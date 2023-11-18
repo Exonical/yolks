@@ -2,12 +2,13 @@
 
 ## File: Pterodactyl Arma 3 Image - entrypoint.sh
 ## Author: David Wolfe (Red-Thirten)
-## Contributors: Aussie Server Hosts (https://aussieserverhosts.com/)
-## Date: 2021/07/13
+## Contributors: Aussie Server Hosts (https://aussieserverhosts.com/), Stephen White (SilK)
+## Date: 2022/11/26
 ## License: MIT License
 
 ## === CONSTANTS ===
 STEAMCMD_DIR="./steamcmd"                       # SteamCMD's directory containing steamcmd.sh
+WORKSHOP_DIR="./Steam/steamapps/workshop"       # SteamCMD's directory containing workshop downloads
 STEAMCMD_LOG="${STEAMCMD_DIR}/steamcmd.log"     # Log file for SteamCMD
 GAME_ID=107410                                  # SteamCMD ID for the Arma 3 GAME (not server). Only used for Workshop mod downloads.
 EGG_URL='https://github.com/parkervcp/eggs/tree/master/game_eggs/steamcmd_servers/arma/arma3'   # URL for Pterodactyl Egg & Info (only used as info to legacy users)
@@ -33,27 +34,28 @@ function RunSteamCMD { #[Input: int server=0 mod=1 optional_mod=2; int id]
     if [[ -f "${STEAMCMD_LOG}" ]]; then
         rm -f "${STEAMCMD_LOG:?}"
     fi
-    
+
     updateAttempt=0
     while (( $updateAttempt < $STEAMCMD_ATTEMPTS )); do # Loop for specified number of attempts
         # Increment attempt counter
         updateAttempt=$((updateAttempt+1))
-        
+
         if (( $updateAttempt > 1 )); then # Notify if not first attempt
             echo -e "\t${YELLOW}Re-Attempting download/update in 3 seconds...${NC} (Attempt ${CYAN}${updateAttempt}${NC} of ${CYAN}${STEAMCMD_ATTEMPTS}${NC})\n"
             sleep 3
         fi
-        
+
         # Check if updating server or mod
         if [[ $1 == 0 ]]; then # Server
-            ${STEAMCMD_DIR}/steamcmd.sh +force_install_dir /home/container "+login \"${STEAM_USER}\" \"${STEAM_PASS}\"" +app_update $2 $extraFlags $validateServer +quit | tee -a "${STEAMCMD_LOG}"
+            numactl --physcpubind=+0 ${STEAMCMD_DIR}/steamcmd.sh +force_install_dir /home/container "+login \"${STEAM_USER}\" \"${STEAM_PASS}\"" +app_update $2 $extraFlags $validateServer +quit | tee -a "${STEAMCMD_LOG}"
         else # Mod
-            ${STEAMCMD_DIR}/steamcmd.sh "+login \"${STEAM_USER}\" \"${STEAM_PASS}\"" +workshop_download_item $GAME_ID $2 +quit | tee -a "${STEAMCMD_LOG}"
+            numactl --physcpubind=+0 ${STEAMCMD_DIR}/steamcmd.sh "+login \"${STEAM_USER}\" \"${STEAM_PASS}\"" +workshop_download_item $GAME_ID $2 +quit | tee -a "${STEAMCMD_LOG}"
         fi
-        
+
         # Error checking for SteamCMD
         steamcmdExitCode=${PIPESTATUS[0]}
-        if [[ -n $(grep -i "error\|failed" "${STEAMCMD_LOG}" | grep -iv "setlocal\|SDL") ]]; then # Catch errors (ignore setlocale and SDL warnings)
+        loggedErrors=$(grep -i "error\|failed" "${STEAMCMD_LOG}" | grep -iv "setlocal\|SDL\|steamservice\|thread")
+        if [[ -n ${loggedErrors} ]]; then # Catch errors (ignore setlocale, SDL, steamservice, and thread priority warnings)
             # Soft errors
             if [[ -n $(grep -i "Timeout downloading item" "${STEAMCMD_LOG}") ]]; then # Mod download timeout
                 echo -e "\n${YELLOW}[UPDATE]: ${NC}Timeout downloading Steam Workshop mod: \"${CYAN}${modName}${NC}\" (${CYAN}${2}${NC})"
@@ -71,7 +73,8 @@ function RunSteamCMD { #[Input: int server=0 mod=1 optional_mod=2; int id]
                 echo -e "\n${RED}[UPDATE]: Cannot login to Steam - Improperly configured account and/or credentials"
                 echo -e "\t${YELLOW}Please contact your administrator/host and give them the following message:${NC}"
                 echo -e "\t${CYAN}Your Egg, or your client's server, is not configured with valid Steam credentials.${NC}"
-                echo -e "\t${CYAN}Either the username/password is wrong, or Steam Guard is not properly configured\n\taccording to this egg's documentation/README.${NC}\n"
+                echo -e "\t${CYAN}Either the username/password is wrong, or Steam Guard is not properly configured"
+                echo -e "\t${CYAN}according to this egg's documentation/README.${NC}\n"
                 exit 1
             elif [[ -n $(grep -i "Download item" "${STEAMCMD_LOG}") ]]; then # Steam account does not own base game for mod downloads, or unknown
                 echo -e "\n${RED}[UPDATE]: Cannot download mod - Download failed"
@@ -85,17 +88,20 @@ function RunSteamCMD { #[Input: int server=0 mod=1 optional_mod=2; int id]
                 exit 1
             elif [[ -n $(grep -i "0x606" "${STEAMCMD_LOG}") ]]; then # Disk write failure
                 echo -e "\n${RED}[UPDATE]: Unable to complete download - Disk write failure"
-                echo -e "\t${YELLOW}This is normally caused by directory permissions issues,\n\tbut could be a more serious hardware issue.${NC}"
+                echo -e "\t${YELLOW}This is normally caused by directory permissions issues,"
+                echo -e "\t${YELLOW}but could be a more serious hardware issue.${NC}"
                 echo -e "\t${YELLOW}(Please contact your administrator/host if this issue persists)${NC}\n"
                 exit 1
             else # Unknown caught error
                 echo -e "\n${RED}[UPDATE]: ${YELLOW}An unknown error has occurred with SteamCMD. ${CYAN}Skipping download...${NC}"
-                echo -e "\t(Please contact your administrator/host if this issue persists)"
+                echo -e "SteamCMD Errors:\n${loggedErrors}"
+                echo -e "\t${YELLOW}(Please contact your administrator/host if this issue persists)${NC}\n"
                 break
             fi
         elif [[ $steamcmdExitCode != 0 ]]; then # Unknown fatal error
             echo -e "\n${RED}[UPDATE]: SteamCMD has crashed for an unknown reason!${NC} (Exit code: ${CYAN}${steamcmdExitCode}${NC})"
             echo -e "\t${YELLOW}(Please contact your administrator/host for support)${NC}\n"
+            cp -r /tmp/dumps /home/container/dumps
             exit $steamcmdExitCode
         else # Success!
             if [[ $1 == 0 ]]; then # Server
@@ -104,8 +110,8 @@ function RunSteamCMD { #[Input: int server=0 mod=1 optional_mod=2; int id]
                 # Move the downloaded mod to the root directory, and replace existing mod if needed
                 mkdir -p ./@$2
                 rm -rf ./@$2/*
-                mv -f ./Steam/steamapps/workshop/content/$GAME_ID/$2/* ./@$2
-                rm -d ./Steam/steamapps/workshop/content/$GAME_ID/$2
+                mv -f ${WORKSHOP_DIR}/content/$GAME_ID/$2/* ./@$2
+                rm -d ${WORKSHOP_DIR}/content/$GAME_ID/$2
                 # Make the mods contents all lowercase
                 ModsLowercase @$2
                 # Move any .bikey's to the keys directory
@@ -166,8 +172,16 @@ function RemoveDuplicates { #[Input: str - Output: printf of new str]
 }
 
 # === ENTRYPOINT START ===
-cd /home/container
+
+# Wait for the container to fully initialize
 sleep 1
+
+# Set environment variable that holds the Internal Docker IP
+INTERNAL_IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
+export INTERNAL_IP
+
+# Switch to the container's working directory
+cd /home/container || exit 1
 
 # Check for old eggs
 if [[ -z ${VALIDATE_SERVER} ]]; then # VALIDATE_SERVER was not in the previous version
@@ -212,18 +226,18 @@ allMods=$(echo $allMods | sed -e 's/;/ /g') # Convert from string to array
 # Update everything (server and mods), if specified
 if [[ ${UPDATE_SERVER} == 1 ]]; then
     echo -e "\n${GREEN}[STARTUP]: ${CYAN}Starting checks for all updates...${NC}"
-    echo -e "(It is okay to ignore any \"SDL\" errors during this process)\n"
-    
+    echo -e "(It is okay to ignore any \"SDL\", \"steamservice\", and \"thread priority\" errors during this process)\n"
+
     ## Update game server
     echo -e "${GREEN}[UPDATE]:${NC} Checking for game server updates with App ID: ${CYAN}${STEAMCMD_APPID}${NC}..."
-    
+
     if [[ ${VALIDATE_SERVER} == 1 ]]; then # Validate will be added as a parameter if specified
         echo -e "\t${CYAN}File validation enabled.${NC} (This may take extra time to complete)"
         validateServer="validate"
     else
         validateServer=""
     fi
-    
+
     # Determine what extra flags should be set
     if [[ -n ${STEAMCMD_EXTRA_FLAGS} ]]; then
         echo -e "\t(${YELLOW}Advanced${NC}) Extra SteamCMD flags specified: ${CYAN}${STEAMCMD_EXTRA_FLAGS}${NC}\n"
@@ -235,9 +249,9 @@ if [[ ${UPDATE_SERVER} == 1 ]]; then
         echo -e ""
         extraFlags=""
     fi
-    
+
     RunSteamCMD 0 ${STEAMCMD_APPID}
-    
+
     ## Update mods
     if [[ -n $allMods ]] && [[ ${DISABLE_MOD_UPDATES} != 1 ]]; then
         echo -e "\n${GREEN}[UPDATE]:${NC} Checking all ${CYAN}Steam Workshop mods${NC} for updates..."
@@ -273,8 +287,12 @@ if [[ ${UPDATE_SERVER} == 1 ]]; then
                     if [[ -n $latestUpdate ]] && [[ $latestUpdate =~ ^[0-9]+$ ]]; then # Notify last update date, if valid
                         echo -e "\tMod was last updated: ${CYAN}$(date -d @${latestUpdate})${NC}"
                     fi
-                    echo -e "\tAttempting mod update/download via SteamCMD...\n"
                     
+                    # Delete SteamCMD appworkshop cache before running to avoid mod download failures
+                    echo -e "\tClearing SteamCMD appworkshop cache..."
+                    rm -f ${WORKSHOP_DIR}/appworkshop_$GAME_ID.acf
+                    
+                    echo -e "\tAttempting mod update/download via SteamCMD...\n"
                     RunSteamCMD $modType $modID
                 fi
             fi
@@ -298,7 +316,7 @@ if [[ ${UPDATE_SERVER} == 1 ]]; then
                     if [[ "${CLIENT_MODS}" != *"@${modID};"* ]]; then
                         echo -e "\tKey file and directory for unconfigured optional mod ${CYAN}${modID}${NC} is being deleted..."
                     fi
-                    
+
                     # Delete the optional mod .bikey file and directory
                     rm ${keyFile}
                     rmdir ./@${modID}_optional 2> /dev/null
@@ -345,15 +363,15 @@ if [[ ! -f ./basic.cfg ]]; then
     curl -sSL ${BASIC_URL} -o ./basic.cfg
 fi
 
-# $NSS_WRAPPER_PASSWD and $NSS_WRAPPER_GROUP have been set by the Dockerfile
+# Setup NSS Wrapper for use ($NSS_WRAPPER_PASSWD and $NSS_WRAPPER_GROUP have been set by the Dockerfile)
 export USER_ID=$(id -u)
 export GROUP_ID=$(id -g)
 envsubst < /passwd.template > ${NSS_WRAPPER_PASSWD}
 
-if [[ ${SERVER_BINARY} == *"x64"* ]]; then # Check which libnss_wrapper architecture to run, based off the server binary name
-    export LD_PRELOAD=/libnss_wrapper_x64.so
+if [[ ${SERVER_BINARY} == *"x64"* ]]; then # Check which libnss-wrapper architecture to run, based off the server binary name
+    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libnss_wrapper.so
 else
-    export LD_PRELOAD=/libnss_wrapper.so
+    export LD_PRELOAD=/usr/lib/i386-linux-gnu/libnss_wrapper.so
 fi
 
 # Replace Startup Variables
